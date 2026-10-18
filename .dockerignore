@@ -1,0 +1,15 @@
+.venv
+.git
+.cursor
+.pytest_cache
+.mypy_cache
+**/__pycache__
+**/*.pyc
+tests
+example-logs
+*.log
+.env
+.env.*
+!.env.example
+agent-transcripts
+.python-version

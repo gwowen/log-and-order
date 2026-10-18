@@ -67,6 +67,8 @@ def interpret_events(
     *,
     prompt: ChatPromptTemplate | None = None,
     incident_text: str | None = None,
+    base_url: str | None = None,
+    timeout: float | None = None,
 ) -> str:
     """Narrate one incident. An empty thinking trace is retried once with a larger budget.
 
@@ -91,7 +93,13 @@ def interpret_events(
                 "Retrying with a larger token budget...",
                 file=sys.stderr,
             )
-        chain = (prompt or REPORT_PROMPT) | build_llm(reasoning=True, num_predict=budget, model=model)
+        chain = (prompt or REPORT_PROMPT) | build_llm(
+            reasoning=True,
+            num_predict=budget,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+        )
         answer = collect_summary(chain, payload)
         if answer:
             return answer

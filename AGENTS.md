@@ -12,16 +12,18 @@ uv run main.py path/to/file --format json --output incident.json
 uv run main.py path/to/file --format agent --no-llm
 uv sync --extra mcp
 LOG_AND_ORDER_ROOT=/absolute/path/to/logs uv run --extra mcp python -m log_and_order.mcp_server
+uv sync --extra api
+OLLAMA_BASE_URL=http://127.0.0.1:11434 LOG_AND_ORDER_MODEL=LiquidAI/lfm2.5-2.6b uv run --extra api python -m log_and_order.api
 uv run python -m unittest
 ```
 
 Ollama must be running locally with `LiquidAI/lfm2.5-2.6b` for a human report, a non-log summary, or the default agent and JSON enrichment. `--no-llm` skips the model. The report goes to stdout unless `--output` is set. Progress goes to stderr.
 
-`tests/test_parser.py` checks record parsing and runtime-frame filtering. `tests/test_extraction.py` checks repeat collapsing and the fixture events. `tests/test_correlation.py` checks cascade grouping, prelude lines, and lifecycle. `tests/test_stacktraces.py` and `tests/test_incidents.py` check source locations and the deterministic incident. `tests/test_reports.py` checks the human, agent, and JSON reports. `tests/test_enrichment.py` checks enrichment with a fake model. `tests/test_cli.py` checks the command line. `tests/test_mcp.py` checks the MCP server with a fake model and one stdio session. A full run of `example-logs/spring_boot_incident_noise.log` is the regression check for the human report.
+`tests/test_parser.py` checks record parsing and runtime-frame filtering. `tests/test_extraction.py` checks repeat collapsing and the fixture events. `tests/test_correlation.py` checks cascade grouping, prelude lines, and lifecycle. `tests/test_stacktraces.py` and `tests/test_incidents.py` check source locations and the deterministic incident. `tests/test_reports.py` checks the human, agent, and JSON reports. `tests/test_enrichment.py` checks enrichment with a fake model. `tests/test_cli.py` checks the command line. `tests/test_mcp.py` checks the MCP server with a fake model and one stdio session. `tests/test_api.py` checks the HTTP server with a fake model and a mocked Ollama tags response. A full run of `example-logs/spring_boot_incident_noise.log` is the regression check for the human report.
 
 ## Layout
 
-`log_and_order/cli.py` reads the file and writes the report. `files.py` is the shared text read. `pipeline.py` chooses the path. `incident_payload` is the JSON document the MCP server returns. `config.py` holds the limits and the default model. `models.py` holds the shared dataclasses. `logs/` parses and correlates events. `is_serious` stays in `logs/correlation.py` because prelude and lifecycle attachment call it while grouping. `incidents/` builds the deterministic report and reads stack frames. `llm/` talks to Ollama. `reports/` only renders. Report modules do not call the model. `mcp_server.py` is a read-only stdio adapter over `incident_payload`. It does not parse logs and it does not import the CLI.
+`log_and_order/cli.py` reads the file and writes the report. `files.py` is the shared text read. `pipeline.py` chooses the path. `incident_payload` is the JSON document the MCP server returns. `config.py` holds the limits and the default model. `models.py` holds the shared dataclasses. `logs/` parses and correlates events. `is_serious` stays in `logs/correlation.py` because prelude and lifecycle attachment call it while grouping. `incidents/` builds the deterministic report and reads stack frames. `llm/` talks to Ollama. `reports/` only renders. Report modules do not call the model. `mcp_server.py` is a read-only stdio adapter over `incident_payload`. It does not parse logs and it does not import the CLI. `api/` is the optional FastAPI adapter over the same `incident_payload`. HTTP routes do not parse logs. The Ollama URL and model for that process come from its settings, not from the request.
 
 ## What the program does
 
@@ -33,6 +35,7 @@ Ollama must be running locally with `LiquidAI/lfm2.5-2.6b` for a human report, a
 - Any other text file is summarized with LangChain when the format is human. Long files are split, partial summaries of `NONE` are dropped, and the rest are combined. `--no-llm` on that path exits 1, because the summary requires the model.
 - An empty file prints `The file is empty.` A file containing a null byte is rejected.
 - The MCP server is another interface to `incident_payload`, not a second analysis implementation. `analyse_log` and `analyse_text` default to `use_llm=false`. `read_log_lines` returns redacted source lines. `LOG_AND_ORDER_ROOT` is the only directory those file tools read. The server does not edit files.
+- The HTTP server is a third interface to `incident_payload`. `POST /api/v1/analyze` redacts the upload and returns that JSON document. `GET /api/v1/health` does not call Ollama. `GET /api/v1/ready` and `GET /api/v1/models` only read Ollama's `/api/tags`. The HTTP process requires `OLLAMA_BASE_URL` and `LOG_AND_ORDER_MODEL`. The CLI and MCP server keep working when those variables are unset.
 
 Do not strip the file before `extract_events`. Line numbers are 1-based and must match the source file.
 
@@ -62,7 +65,7 @@ Keep this work in code. Do not ask the model to filter, group, or recover line n
 
 The human report prompt may only ask the model to narrate the primary incident. It must cite line numbers that appear in that incident, use the timestamp on the failure line, and not suggest a fix. Do not ask it to classify independent warnings or invent missing lines. Python writes **Other warnings** after the model returns. Do not point the human report at the enrichment prompt, or the enrichment prompt at `REPORT_PROMPT`.
 
-`enrich_incident` is only for agent and JSON reports. It sends a compact evidence package, with log text fenced as untrusted data, and asks for JSON with reasoning off. Retry once when the reply is only a thinking trace, is not JSON, or fails validation. Do not retry a connection failure. Keep at most three hypotheses and five investigation steps. High confidence requires the failure line or a confirmed line. `--dump-events` prints the human-report model input and the independent events without calling Ollama. It ignores `--format`. `--output` writes that dump, or the report, to a file and leaves stdout empty.
+`enrich_incident` is only for agent and JSON reports. It sends a compact evidence package, with log text fenced as untrusted data, and asks for JSON with reasoning off. Retry once when the reply is only a thinking trace, is not JSON, or fails validation. Do not retry a connection failure. The retry builds a new client with the same model, Ollama URL, and timeout as the client already in use. `build_llm` does not read the environment. Callers pass `base_url` and `timeout`. Keep at most three hypotheses and five investigation steps. High confidence requires the failure line or a confirmed line. `--dump-events` prints the human-report model input and the independent events without calling Ollama. It ignores `--format`. `--output` writes that dump, or the report, to a file and leaves stdout empty.
 
 The non-log summary keeps `reasoning=False`. Do not point that path at the log report prompt.
 

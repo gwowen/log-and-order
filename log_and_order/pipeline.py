@@ -65,6 +65,8 @@ def _report_and_enrichment(
     *,
     use_llm: bool,
     model: str | None,
+    base_url: str | None = None,
+    timeout: float | None = None,
     jenkins: JenkinsAnalysis | None = None,
 ) -> tuple[IncidentReport, IncidentEnrichment]:
     """Build one incident and the optional analysis. The model cannot replace the facts."""
@@ -80,9 +82,22 @@ def _report_and_enrichment(
         enrichment = fallback_enrichment("no_incident")
     else:
         try:
-            llm = build_llm(reasoning=False, num_predict=1024, model=model, json_mode=True)
+            llm = build_llm(
+                reasoning=False,
+                num_predict=1024,
+                model=model,
+                json_mode=True,
+                base_url=base_url,
+                timeout=timeout,
+            )
             enrichment = enrich_incident(report, primary, llm)
-        except (httpx.ConnectError, httpx.TimeoutException, ResponseError, GenerationError) as exc:
+        except (
+            httpx.ConnectError,
+            httpx.TimeoutException,
+            ResponseError,
+            GenerationError,
+            ConnectionError,
+        ) as exc:
             print(
                 f"Enrichment failed ({exc}). Writing the deterministic incident report.",
                 file=sys.stderr,
@@ -99,6 +114,8 @@ def _agent_or_json(
     *,
     use_llm: bool,
     model: str | None,
+    base_url: str | None = None,
+    timeout: float | None = None,
     jenkins: JenkinsAnalysis | None = None,
 ) -> str:
     """One incident document. The model is optional and cannot replace the facts."""
@@ -108,6 +125,8 @@ def _agent_or_json(
         events,
         use_llm=use_llm,
         model=model,
+        base_url=base_url,
+        timeout=timeout,
         jenkins=jenkins,
     )
     if report_format == "json":
@@ -121,6 +140,8 @@ def incident_payload(
     *,
     use_llm: bool = False,
     model: str | None = None,
+    base_url: str | None = None,
+    timeout: float | None = None,
 ) -> dict:
     """The JSON incident document. Raises FormatError when the text is not a log.
 
@@ -137,6 +158,8 @@ def incident_payload(
             jenkins.events,
             use_llm=use_llm,
             model=model,
+            base_url=base_url,
+            timeout=timeout,
             jenkins=jenkins,
         )
         return report_payload(report, enrichment)
@@ -149,6 +172,8 @@ def incident_payload(
         events,
         use_llm=use_llm,
         model=model,
+        base_url=base_url,
+        timeout=timeout,
     )
     return report_payload(report, enrichment)
 
@@ -160,6 +185,8 @@ def summarize(
     *,
     use_llm: bool = True,
     model: str | None = None,
+    base_url: str | None = None,
+    timeout: float | None = None,
 ) -> str:
     """Report a Jenkins console or a timestamped log, or summarize other text.
 
@@ -178,6 +205,8 @@ def summarize(
             report_format,
             use_llm=use_llm,
             model=model,
+            base_url=base_url,
+            timeout=timeout,
         )
     events = extract_events(text)
     if events is not None:
@@ -186,19 +215,43 @@ def summarize(
         if not events:
             if report_format == "human":
                 return "No relevant errors or warnings were found."
-            return _agent_or_json(path, text, events, report_format, use_llm=use_llm, model=model)
+            return _agent_or_json(
+                path,
+                text,
+                events,
+                report_format,
+                use_llm=use_llm,
+                model=model,
+                base_url=base_url,
+                timeout=timeout,
+            )
         print(
             f"Extracted {len(events)} events from {len(text.splitlines())} lines.",
             file=sys.stderr,
         )
         if report_format in {"agent", "json"}:
-            return _agent_or_json(path, text, events, report_format, use_llm=use_llm, model=model)
+            return _agent_or_json(
+                path,
+                text,
+                events,
+                report_format,
+                use_llm=use_llm,
+                model=model,
+                base_url=base_url,
+                timeout=timeout,
+            )
         primary = select_primary(events)
         independent = independent_events(events, primary)
         if not use_llm or primary is None:
             return fallback_report(primary, independent)
         try:
-            narrative = interpret_events(path, primary, model)
+            narrative = interpret_events(
+                path,
+                primary,
+                model,
+                base_url=base_url,
+                timeout=timeout,
+            )
         except GenerationError:
             print(
                 "The model did not produce a summary. Using the extracted events.",
@@ -214,7 +267,7 @@ def summarize(
         raise FormatError("A non-log summary requires the model.")
 
     print(f"Summarizing {path} with {chosen}...", file=sys.stderr)
-    llm = build_llm(model=model)
+    llm = build_llm(model=model, base_url=base_url, timeout=timeout)
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
@@ -235,6 +288,8 @@ def _summarize_jenkins(
     *,
     use_llm: bool,
     model: str | None,
+    base_url: str | None = None,
+    timeout: float | None = None,
 ) -> str:
     """Report a Jenkins console log through the same human, agent, and JSON outputs."""
     print(
@@ -249,6 +304,8 @@ def _summarize_jenkins(
             report_format,
             use_llm=use_llm,
             model=model,
+            base_url=base_url,
+            timeout=timeout,
             jenkins=jenkins,
         )
     report = build_jenkins_report(path, jenkins)
@@ -261,6 +318,8 @@ def _summarize_jenkins(
             model,
             prompt=JENKINS_REPORT_PROMPT,
             incident_text=format_jenkins_model_input(jenkins),
+            base_url=base_url,
+            timeout=timeout,
         )
     except GenerationError:
         print(

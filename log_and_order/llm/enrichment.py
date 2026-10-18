@@ -20,6 +20,8 @@ from ..models import (
 )
 from .client import (
     build_llm,
+    llm_base_url,
+    llm_timeout,
     message_text,
     strip_think,
 )
@@ -173,6 +175,8 @@ def enrich_incident(report: IncidentReport, event: Event, llm: ChatOllama) -> In
                 num_predict=2048,
                 model=model_name,
                 json_mode=True,
+                base_url=llm_base_url(llm),
+                timeout=llm_timeout(llm),
             )
         messages = ENRICH_PROMPT.format_messages(text=package.text)
         try:
