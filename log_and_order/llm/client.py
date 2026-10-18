@@ -68,19 +68,44 @@ def complete(chain, payload: dict[str, str]) -> str:
     raise GenerationError("The model did not produce a summary.")
 
 
+def llm_base_url(llm: ChatOllama) -> str | None:
+    """The Ollama URL stored on a client, if one was supplied."""
+    value = getattr(llm, "base_url", None)
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def llm_timeout(llm: ChatOllama) -> float | None:
+    """The request timeout stored on a client, if one was supplied."""
+    kwargs = getattr(llm, "client_kwargs", None) or {}
+    timeout = kwargs.get("timeout")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        return None
+    return float(timeout)
+
+
 def build_llm(
     *,
     reasoning: bool = False,
     num_predict: int = 1024,
     model: str | None = None,
     json_mode: bool = False,
+    base_url: str | None = None,
+    timeout: float | None = None,
 ) -> ChatOllama:
     """Build the local chat model.
 
     The human log report turns reasoning on so a thinking trace stays out of
     the printed answer. Structured enrichment leaves reasoning off and asks
-    Ollama for JSON.
+    Ollama for JSON. base_url and timeout are omitted when unset, so the
+    Ollama client keeps its own default host and no deadline.
     """
+    options: dict = {}
+    if base_url:
+        options["base_url"] = base_url
+    if timeout is not None:
+        options["client_kwargs"] = {"timeout": timeout}
     return ChatOllama(
         model=model or MODEL_NAME,
         temperature=0.1,
@@ -88,4 +113,5 @@ def build_llm(
         num_ctx=8192,
         num_predict=num_predict,
         format="json" if json_mode else None,
+        **options,
     )

@@ -16,6 +16,8 @@ from .config import (
     MCP_MAX_INPUT_BYTES,
     MCP_MAX_LINE_CHARS,
     MCP_MAX_LINE_COUNT,
+    configured_base_url,
+    configured_model,
 )
 from .files import read_text_file
 from .logs.jenkins.text import redact
@@ -215,7 +217,8 @@ def analyse_content(
             path,
             redacted,
             use_llm=use_llm,
-            model=_model_name(model),
+            model=configured_model(_model_name(model)),
+            base_url=configured_base_url(),
         )
     except FormatError as exc:
         raise _tool_error(str(exc)) from exc

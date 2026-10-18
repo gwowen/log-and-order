@@ -15,8 +15,16 @@ dependencies = [
 mcp = [
     "mcp>=2.3,<3",
 ]
+api = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.32,<1",
+    "python-multipart>=0.0.18",
+]
 
 [dependency-groups]
 dev = [
     "mcp>=2.3,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.32,<1",
+    "python-multipart>=0.0.18",
 ]

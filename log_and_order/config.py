@@ -1,5 +1,6 @@
 """Defaults and limits. Values match the original single-module program."""
 
+import os
 from datetime import timedelta
 
 MODEL_NAME = "LiquidAI/lfm2.5-2.6b"
@@ -38,3 +39,26 @@ MAX_ANALYSIS_TEXT = 400
 LINE_TEXT_LIMIT = 500
 # Room left in the evidence package for the instruction note.
 _NOTE_RESERVE = 180
+
+
+def configured_model(explicit: str | None = None) -> str | None:
+    """An explicit model name, otherwise LOG_AND_ORDER_MODEL.
+
+    None leaves the built-in MODEL_NAME in place. The HTTP server does not use
+    this fallback: it requires LOG_AND_ORDER_MODEL at startup.
+    """
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    env = os.environ.get("LOG_AND_ORDER_MODEL", "").strip()
+    return env or None
+
+
+def configured_base_url(explicit: str | None = None) -> str | None:
+    """An explicit Ollama URL, otherwise OLLAMA_BASE_URL.
+
+    None leaves the Ollama client's own default. The HTTP server requires a URL.
+    """
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    env = os.environ.get("OLLAMA_BASE_URL", "").strip()
+    return env or None

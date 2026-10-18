@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 from ollama import ResponseError
 
-from .config import MODEL_NAME
+from .config import MODEL_NAME, configured_base_url, configured_model
 from .files import read_text_file as read_file
 from .llm.client import GenerationError
 from .logs.extraction import extract_events
@@ -47,7 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        help=f"Ollama model name. Defaults to {MODEL_NAME}.",
+        help=f"Ollama model name. Defaults to LOG_AND_ORDER_MODEL when set, otherwise {MODEL_NAME}.",
+    )
+    parser.add_argument(
+        "--ollama-url",
+        help="Ollama server URL. Defaults to OLLAMA_BASE_URL when set, otherwise the local Ollama client.",
     )
     parser.add_argument(
         "--output",
@@ -112,12 +116,13 @@ def main(argv: list[str] | None = None) -> int:
             text,
             args.report_format,
             use_llm=not args.no_llm,
-            model=args.model,
+            model=configured_model(args.model),
+            base_url=configured_base_url(args.ollama_url),
         )
     except FormatError as exc:
         print(exc, file=sys.stderr)
         return 1
-    except httpx.ConnectError:
+    except (httpx.ConnectError, ConnectionError):
         print(
             "Could not connect to Ollama. Start it and try again.",
             file=sys.stderr,
