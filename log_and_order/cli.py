@@ -8,20 +8,13 @@ import httpx
 from ollama import ResponseError
 
 from .config import MODEL_NAME
+from .files import read_text_file as read_file
 from .llm.client import GenerationError
 from .logs.extraction import extract_events
 from .logs.jenkins.analysis import analyse_jenkins
 from .pipeline import FormatError, summarize
 from .reports.human import dump_events
 from .reports.jenkins import dump_jenkins
-
-
-def read_file(path: Path) -> str:
-    """Read text. A null byte means the file is binary."""
-    data = path.read_bytes()
-    if b"\0" in data:
-        raise ValueError(f"{path} looks like a binary file")
-    return data.decode("utf-8", errors="replace")
 
 
 def publish(text: str, output: Path | None) -> None:

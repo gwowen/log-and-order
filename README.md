@@ -74,6 +74,162 @@ These logs in `example-logs/` are noisy incidents the report is meant to digest:
 
 Jenkins consoles in `example-logs/` include a noisy TypeScript build failure, with and without Timestamper prefixes, plus smaller pipeline, freestyle, test, deploy, and infrastructure failures.
 
+## MCP server
+
+The same analysis is available to MCP clients such as Claude Code, Codex, and Cursor. The server is a read-only adapter. It does not parse logs itself, does not connect to a Jenkins server, and does not edit source files. A downloaded Jenkins console log is enough.
+
+Deterministic analysis is the default. `use_llm` is false unless the client sets it, so the report does not call Ollama. Set `use_llm` true to add the same local enrichment the CLI uses for `--format json`. If Ollama is down or the reply fails validation, the factual report is still returned.
+
+### Install and launch
+
+MCP is an optional extra. People who only use the command line can leave it out.
+
+```bash
+uv sync --extra mcp
+```
+
+A normal `uv sync` also installs the SDK for development, because the dev dependency group depends on `mcp` too. `uv sync --no-dev --no-extra mcp` keeps the CLI install without the server.
+
+The process speaks MCP on stdin and stdout and keeps running until the client disconnects. Diagnostics stay on stderr. In a terminal with no client it looks idle, which is expected.
+
+```bash
+LOG_AND_ORDER_ROOT=/absolute/path/to/logs \
+  uv run --extra mcp python -m log_and_order.mcp_server
+```
+
+`LOG_AND_ORDER_ROOT` is the only directory the file tools will read. The path is resolved, including symlinks, and must already be a directory. Relative tool paths are joined to that directory. Absolute paths and symlinks that leave it are rejected. When the variable is unset, the process working directory is the root, and the server says so on stderr. Set the variable when a client starts the server from another directory.
+
+Inputs larger than 32 MiB are rejected. `read_log_lines` returns at most 200 lines, and each returned line is capped at 2,000 characters. Obvious secrets are redacted with the same replacements the Jenkins parser uses. The server never runs commands found in a log.
+
+### Tools
+
+`analyse_log` reads one log file and returns the JSON incident document used by `--format json`.
+
+- `path` (required): file inside `LOG_AND_ORDER_ROOT`
+- `use_llm`: default `false`
+- `model`: optional Ollama model name
+- `detail`: `full` (default) or `compact`
+
+`detail=full` is that document unchanged: incident, locations, timeline, evidence, analysis, other warnings, and `jenkins` when the file is a console log. `source_line` is a line in application code. Evidence line numbers are lines in the log. `detail=compact` keeps the incident, locations, Jenkins facts, and those line numbers, and drops log excerpts.
+
+`read_log_lines` returns original log lines for the numbers in the report.
+
+- `path` (required)
+- `start_line` (required, 1-based)
+- `count`: default 30, capped at 200
+
+`analyse_text` analyses log text that is not stored in a file. Line numbers are relative to `content`. The result uses the same document. Nothing is written to disk.
+
+- `content` (required)
+- `use_llm`: default `false`
+- `model`
+- `detail`: `full` or `compact`
+
+A coding agent that wants to change the application uses this evidence in its own session. The MCP server does not apply a fix.
+
+### Claude Code
+
+Project configuration in `.mcp.json`. Replace both absolute paths.
+
+```json
+{
+  "mcpServers": {
+    "log-and-order": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/absolute/path/to/log-reader",
+        "--extra",
+        "mcp",
+        "python",
+        "-m",
+        "log_and_order.mcp_server"
+      ],
+      "env": {
+        "LOG_AND_ORDER_ROOT": "/absolute/path/to/logs"
+      }
+    }
+  }
+}
+```
+
+Or add it from the shell:
+
+```bash
+claude mcp add \
+  --env LOG_AND_ORDER_ROOT=/absolute/path/to/logs \
+  --transport stdio \
+  log-and-order -- \
+  uv run --directory /absolute/path/to/log-reader --extra mcp python -m log_and_order.mcp_server
+```
+
+### Codex
+
+`~/.codex/config.toml`, or `.codex/config.toml` for a trusted project:
+
+```toml
+[mcp_servers.log-and-order]
+command = "uv"
+args = [
+  "run",
+  "--directory",
+  "/absolute/path/to/log-reader",
+  "--extra",
+  "mcp",
+  "python",
+  "-m",
+  "log_and_order.mcp_server",
+]
+
+[mcp_servers.log-and-order.env]
+LOG_AND_ORDER_ROOT = "/absolute/path/to/logs"
+```
+
+```bash
+codex mcp add log-and-order \
+  --env LOG_AND_ORDER_ROOT=/absolute/path/to/logs -- \
+  uv run --directory /absolute/path/to/log-reader --extra mcp python -m log_and_order.mcp_server
+```
+
+### Cursor
+
+`.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "log-and-order": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/absolute/path/to/log-reader",
+        "--extra",
+        "mcp",
+        "python",
+        "-m",
+        "log_and_order.mcp_server"
+      ],
+      "env": {
+        "LOG_AND_ORDER_ROOT": "/absolute/path/to/logs"
+      }
+    }
+  }
+}
+```
+
+### MCP Inspector
+
+The Inspector starts the server the same way a client does. The environment variable is inherited by that process.
+
+```bash
+LOG_AND_ORDER_ROOT=/absolute/path/to/logs \
+  npx @modelcontextprotocol/inspector \
+  uv --directory /absolute/path/to/log-reader run --extra mcp python -m log_and_order.mcp_server
+```
+
 ## Tests
 
 Extraction and report enrichment are checked without the model:

@@ -23,6 +23,13 @@ MAX_RECOVERY_LINES = 2
 
 SCHEMA_VERSION = 1
 EVIDENCE_BUDGET = 6_000
+# MCP file tools refuse inputs larger than this.
+MCP_MAX_INPUT_BYTES = 32 * 1024 * 1024
+# read_log_lines never returns more lines than this.
+MCP_MAX_LINE_COUNT = 200
+MCP_DEFAULT_LINE_COUNT = 30
+# One returned log line is capped so a single huge line cannot dominate the reply.
+MCP_MAX_LINE_CHARS = 2_000
 MAX_HYPOTHESES = 3
 MAX_STEPS = 5
 MAX_REGRESSION_TESTS = 3
