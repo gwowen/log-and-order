@@ -1,6 +1,7 @@
 """JSON incident document. Schema version stays 1."""
 import json
 from dataclasses import asdict
+from typing import Any
 
 from ..config import (
     SCHEMA_VERSION,
@@ -56,9 +57,9 @@ def _jenkins_payload(facts: JenkinsFacts) -> dict:
     }
 
 
-def render_json_report(report: IncidentReport, enrichment: IncidentEnrichment) -> str:
-    """The same incident and the same analysis object as the Markdown brief."""
-    payload = {
+def report_payload(report: IncidentReport, enrichment: IncidentEnrichment) -> dict[str, Any]:
+    """The incident document. `render_json_report` prints this same object."""
+    payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "source": report.source,
         "incident": {
@@ -87,4 +88,9 @@ def render_json_report(report: IncidentReport, enrichment: IncidentEnrichment) -
     }
     if report.jenkins is not None:
         payload["jenkins"] = _jenkins_payload(report.jenkins)
-    return json.dumps(payload, indent=2) + "\n"
+    return payload
+
+
+def render_json_report(report: IncidentReport, enrichment: IncidentEnrichment) -> str:
+    """The same incident and the same analysis object as the Markdown brief."""
+    return json.dumps(report_payload(report, enrichment), indent=2) + "\n"

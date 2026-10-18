@@ -17,11 +17,11 @@ from .llm.summarization import interpret_events, summarize_chunks
 from .logs.extraction import extract_events
 from .logs.jenkins.analysis import JenkinsAnalysis, analyse_jenkins
 from .logs.selection import independent_events, select_primary
-from .models import Event, IncidentEnrichment
+from .models import Event, IncidentEnrichment, IncidentReport
 from .reports.agent import render_agent_report
 from .reports.human import compose_report, fallback_narrative, fallback_report
 from .reports.jenkins import format_jenkins_model_input, render_jenkins_human
-from .reports.json import render_json_report
+from .reports.json import render_json_report, report_payload
 
 
 class FormatError(Exception):
@@ -58,17 +58,16 @@ def format_json_report(
     return render_json_report(report, enrichment or disabled_enrichment())
 
 
-def _agent_or_json(
+def _report_and_enrichment(
     path: Path,
     text: str,
     events: list[Event],
-    report_format: str,
     *,
     use_llm: bool,
     model: str | None,
     jenkins: JenkinsAnalysis | None = None,
-) -> str:
-    """One incident document. The model is optional and cannot replace the facts."""
+) -> tuple[IncidentReport, IncidentEnrichment]:
+    """Build one incident and the optional analysis. The model cannot replace the facts."""
     if jenkins is not None:
         report = build_jenkins_report(path, jenkins)
         primary = jenkins.primary_event
@@ -89,9 +88,69 @@ def _agent_or_json(
                 file=sys.stderr,
             )
             enrichment = fallback_enrichment("unavailable", model or MODEL_NAME)
+    return report, enrichment
+
+
+def _agent_or_json(
+    path: Path,
+    text: str,
+    events: list[Event],
+    report_format: str,
+    *,
+    use_llm: bool,
+    model: str | None,
+    jenkins: JenkinsAnalysis | None = None,
+) -> str:
+    """One incident document. The model is optional and cannot replace the facts."""
+    report, enrichment = _report_and_enrichment(
+        path,
+        text,
+        events,
+        use_llm=use_llm,
+        model=model,
+        jenkins=jenkins,
+    )
     if report_format == "json":
         return render_json_report(report, enrichment)
     return render_agent_report(report, enrichment)
+
+
+def incident_payload(
+    path: Path,
+    text: str,
+    *,
+    use_llm: bool = False,
+    model: str | None = None,
+) -> dict:
+    """The JSON incident document. Raises FormatError when the text is not a log.
+
+    Jenkins is detected first, including consoles that have no timestamps.
+    A timestamped log with no kept events still returns the empty incident.
+    use_llm false leaves the analysis disabled. A model that cannot be reached
+    still returns the factual report.
+    """
+    jenkins = analyse_jenkins(text)
+    if jenkins is not None:
+        report, enrichment = _report_and_enrichment(
+            path,
+            "",
+            jenkins.events,
+            use_llm=use_llm,
+            model=model,
+            jenkins=jenkins,
+        )
+        return report_payload(report, enrichment)
+    events = extract_events(text)
+    if events is None:
+        raise FormatError("Agent and JSON reports require a timestamped log.")
+    report, enrichment = _report_and_enrichment(
+        path,
+        text,
+        events,
+        use_llm=use_llm,
+        model=model,
+    )
+    return report_payload(report, enrichment)
 
 
 def summarize(
