@@ -3,14 +3,12 @@
 import sys
 from pathlib import Path
 
-import httpx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from ollama import ResponseError
 
 from .config import CHUNK_OVERLAP, CHUNK_SIZE, MODEL_NAME
 from .incidents.builder import build_incident_report
 from .incidents.jenkins import build_jenkins_report
-from .llm.client import GenerationError, build_llm
+from .llm.client import MODEL_TRANSPORT_ERRORS, GenerationError, build_llm
 from .llm.enrichment import disabled_enrichment, enrich_incident, fallback_enrichment
 from .llm.prompts import COMBINE_PROMPT, JENKINS_REPORT_PROMPT, SUMMARIZE_PROMPT
 from .llm.summarization import interpret_events, summarize_chunks
@@ -67,6 +65,8 @@ def _report_and_enrichment(
     model: str | None,
     base_url: str | None = None,
     timeout: float | None = None,
+    backend: str = "ollama",
+    api_key: str | None = None,
     jenkins: JenkinsAnalysis | None = None,
 ) -> tuple[IncidentReport, IncidentEnrichment]:
     """Build one incident and the optional analysis. The model cannot replace the facts."""
@@ -89,15 +89,19 @@ def _report_and_enrichment(
                 json_mode=True,
                 base_url=base_url,
                 timeout=timeout,
+                backend=backend,
+                api_key=api_key,
             )
-            enrichment = enrich_incident(report, primary, llm)
-        except (
-            httpx.ConnectError,
-            httpx.TimeoutException,
-            ResponseError,
-            GenerationError,
-            ConnectionError,
-        ) as exc:
+            enrichment = enrich_incident(
+                report,
+                primary,
+                llm,
+                backend=backend,
+                base_url=base_url,
+                timeout=timeout,
+                api_key=api_key,
+            )
+        except (GenerationError, *MODEL_TRANSPORT_ERRORS) as exc:
             print(
                 f"Enrichment failed ({exc}). Writing the deterministic incident report.",
                 file=sys.stderr,
@@ -116,6 +120,8 @@ def _agent_or_json(
     model: str | None,
     base_url: str | None = None,
     timeout: float | None = None,
+    backend: str = "ollama",
+    api_key: str | None = None,
     jenkins: JenkinsAnalysis | None = None,
 ) -> str:
     """One incident document. The model is optional and cannot replace the facts."""
@@ -127,6 +133,8 @@ def _agent_or_json(
         model=model,
         base_url=base_url,
         timeout=timeout,
+        backend=backend,
+        api_key=api_key,
         jenkins=jenkins,
     )
     if report_format == "json":
@@ -142,6 +150,8 @@ def incident_payload(
     model: str | None = None,
     base_url: str | None = None,
     timeout: float | None = None,
+    backend: str = "ollama",
+    api_key: str | None = None,
 ) -> dict:
     """The JSON incident document. Raises FormatError when the text is not a log.
 
@@ -160,6 +170,8 @@ def incident_payload(
             model=model,
             base_url=base_url,
             timeout=timeout,
+            backend=backend,
+            api_key=api_key,
             jenkins=jenkins,
         )
         return report_payload(report, enrichment)
@@ -174,6 +186,8 @@ def incident_payload(
         model=model,
         base_url=base_url,
         timeout=timeout,
+        backend=backend,
+        api_key=api_key,
     )
     return report_payload(report, enrichment)
 
@@ -187,6 +201,8 @@ def summarize(
     model: str | None = None,
     base_url: str | None = None,
     timeout: float | None = None,
+    backend: str = "ollama",
+    api_key: str | None = None,
 ) -> str:
     """Report a Jenkins console or a timestamped log, or summarize other text.
 
@@ -207,6 +223,8 @@ def summarize(
             model=model,
             base_url=base_url,
             timeout=timeout,
+            backend=backend,
+            api_key=api_key,
         )
     events = extract_events(text)
     if events is not None:
@@ -224,6 +242,8 @@ def summarize(
                 model=model,
                 base_url=base_url,
                 timeout=timeout,
+                backend=backend,
+                api_key=api_key,
             )
         print(
             f"Extracted {len(events)} events from {len(text.splitlines())} lines.",
@@ -239,6 +259,8 @@ def summarize(
                 model=model,
                 base_url=base_url,
                 timeout=timeout,
+                backend=backend,
+                api_key=api_key,
             )
         primary = select_primary(events)
         independent = independent_events(events, primary)
@@ -251,6 +273,8 @@ def summarize(
                 model,
                 base_url=base_url,
                 timeout=timeout,
+                backend=backend,
+                api_key=api_key,
             )
         except GenerationError:
             print(
@@ -267,7 +291,13 @@ def summarize(
         raise FormatError("A non-log summary requires the model.")
 
     print(f"Summarizing {path} with {chosen}...", file=sys.stderr)
-    llm = build_llm(model=model, base_url=base_url, timeout=timeout)
+    llm = build_llm(
+        model=model,
+        base_url=base_url,
+        timeout=timeout,
+        backend=backend,
+        api_key=api_key,
+    )
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
@@ -290,6 +320,8 @@ def _summarize_jenkins(
     model: str | None,
     base_url: str | None = None,
     timeout: float | None = None,
+    backend: str = "ollama",
+    api_key: str | None = None,
 ) -> str:
     """Report a Jenkins console log through the same human, agent, and JSON outputs."""
     print(
@@ -306,6 +338,8 @@ def _summarize_jenkins(
             model=model,
             base_url=base_url,
             timeout=timeout,
+            backend=backend,
+            api_key=api_key,
             jenkins=jenkins,
         )
     report = build_jenkins_report(path, jenkins)
@@ -320,6 +354,8 @@ def _summarize_jenkins(
             incident_text=format_jenkins_model_input(jenkins),
             base_url=base_url,
             timeout=timeout,
+            backend=backend,
+            api_key=api_key,
         )
     except GenerationError:
         print(

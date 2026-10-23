@@ -1,9 +1,7 @@
 """Ask the model for diagnostic analysis and keep only supported claims."""
 import sys
 
-from langchain_ollama import ChatOllama
-import httpx
-from ollama import ResponseError
+from langchain_core.language_models import BaseChatModel
 
 from ..config import (
     EVIDENCE_BUDGET,
@@ -19,9 +17,8 @@ from ..models import (
     IncidentReport,
 )
 from .client import (
+    MODEL_TRANSPORT_ERRORS,
     build_llm,
-    llm_base_url,
-    llm_timeout,
     message_text,
     strip_think,
 )
@@ -162,7 +159,16 @@ def build_evidence_package(report: IncidentReport, event: Event) -> EvidencePack
         omitted=omitted,
     )
 
-def enrich_incident(report: IncidentReport, event: Event, llm: ChatOllama) -> IncidentEnrichment:
+def enrich_incident(
+    report: IncidentReport,
+    event: Event,
+    llm: BaseChatModel,
+    *,
+    backend: str = "ollama",
+    base_url: str | None = None,
+    timeout: float | None = None,
+    api_key: str | None = None,
+) -> IncidentEnrichment:
     """Ask the model for structured analysis and keep only claims the evidence supports."""
     package = build_evidence_package(report, event)
     model_name = getattr(llm, "model", None) or MODEL_NAME
@@ -175,13 +181,15 @@ def enrich_incident(report: IncidentReport, event: Event, llm: ChatOllama) -> In
                 num_predict=2048,
                 model=model_name,
                 json_mode=True,
-                base_url=llm_base_url(llm),
-                timeout=llm_timeout(llm),
+                base_url=base_url,
+                timeout=timeout,
+                backend=backend,
+                api_key=api_key,
             )
         messages = ENRICH_PROMPT.format_messages(text=package.text)
         try:
             message = active.invoke(messages)
-        except (httpx.ConnectError, httpx.TimeoutException, ResponseError):
+        except MODEL_TRANSPORT_ERRORS:
             # A connection failure is not retried. An empty or invalid reply is.
             raise
         answer = strip_think(message_text(message))

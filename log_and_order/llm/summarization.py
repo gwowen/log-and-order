@@ -3,8 +3,8 @@
 import sys
 from pathlib import Path
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama import ChatOllama
 
 from ..config import MODEL_NAME
 from ..logs.selection import event_id
@@ -24,13 +24,26 @@ def is_none(text: str) -> bool:
     return text.strip().upper() in {"NONE", "NONE."}
 
 
+# Ollama answers fit in the smaller cap. llama.cpp reasoning models, including
+# Bonsai, can spend several thousand tokens inside the trace before the answer.
+OLLAMA_NARRATIVE_BUDGETS = (2048, 4096)
+LLAMA_NARRATIVE_BUDGETS = (8192, 16384)
+
+
+def narrative_budgets(backend: str) -> tuple[int, int]:
+    """Token caps for the human report. The second value is the one retry."""
+    if backend == "llamacpp":
+        return LLAMA_NARRATIVE_BUDGETS
+    return OLLAMA_NARRATIVE_BUDGETS
+
+
 def summarize_chunks(
     path: Path,
     chunks: list[str],
     *,
     piece_prompt: ChatPromptTemplate,
     combine_prompt: ChatPromptTemplate,
-    llm: ChatOllama,
+    llm: BaseChatModel,
 ) -> str:
     """Summarize each chunk, drop NONE parts, and combine what remains."""
     piece_chain = piece_prompt | llm
@@ -69,10 +82,13 @@ def interpret_events(
     incident_text: str | None = None,
     base_url: str | None = None,
     timeout: float | None = None,
+    backend: str = "ollama",
+    api_key: str | None = None,
 ) -> str:
     """Narrate one incident. An empty thinking trace is retried once with a larger budget.
 
-    The retry builds a new client with `num_predict` raised from 2048 to 4096.
+    Ollama retries from 2048 tokens to 4096. llama.cpp retries from 8192 to
+    16384, because a thinking model can use the smaller cap before it answers.
     The same budget is not tried twice. A second empty reply raises GenerationError.
     Jenkins reports pass their own prompt and the extracted incident text.
     """
@@ -85,7 +101,7 @@ def interpret_events(
         "source": path.name,
         "text": incident_text if incident_text is not None else format_model_input(event),
     }
-    budgets = (2048, 4096)
+    budgets = narrative_budgets(backend)
     for attempt, budget in enumerate(budgets):
         if attempt:
             print(
@@ -99,6 +115,8 @@ def interpret_events(
             model=model,
             base_url=base_url,
             timeout=timeout,
+            backend=backend,
+            api_key=api_key,
         )
         answer = collect_summary(chain, payload)
         if answer:

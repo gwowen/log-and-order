@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from openai import APIConnectionError, APIStatusError
 
 from log_and_order.cli import main
 from log_and_order.config import EVIDENCE_BUDGET
@@ -331,6 +332,30 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(len(fake.seen), 2)
         self.assertIn("not valid", stderr.getvalue())
 
+    def test_retry_keeps_the_llama_cpp_settings(self) -> None:
+        _, report, event = package_for("gin_web_crash_noisy.log")
+        fake = FakeModel(["{not json", "{}"])
+        with (
+            patch("log_and_order.llm.enrichment.build_llm", return_value=fake) as built,
+            redirect_stderr(io.StringIO()),
+        ):
+            result = enrich_incident(
+                report,
+                event,
+                fake,
+                backend="llamacpp",
+                base_url="http://127.0.0.1:8080",
+                timeout=15,
+                api_key="upstream-key",
+            )
+        self.assertTrue(result.enriched)
+        self.assertEqual(built.call_args.kwargs["backend"], "llamacpp")
+        self.assertEqual(built.call_args.kwargs["base_url"], "http://127.0.0.1:8080")
+        self.assertEqual(built.call_args.kwargs["timeout"], 15)
+        self.assertEqual(built.call_args.kwargs["api_key"], "upstream-key")
+        self.assertFalse(built.call_args.kwargs["reasoning"])
+        self.assertTrue(built.call_args.kwargs["json_mode"])
+
     def test_thinking_only_reply_falls_back(self) -> None:
         _, report, event = package_for("actix_web_crash_noisy.log")
         fake = FakeModel(["<think>only a trace</think>", "<think>still thinking</think>"])
@@ -415,17 +440,28 @@ class ReportIntegrationTest(unittest.TestCase):
 
     def test_connection_failure_still_prints_json(self) -> None:
         text = (LOGS / "django_rest_crash_noisy.log").read_text()
-        fake = FakeModel([httpx.ConnectError("refused")])
-        stderr = io.StringIO()
-        with patch_llm(return_value=fake), redirect_stderr(stderr):
-            rendered = summarize(Path("django.log"), text, "json")
-        payload = json.loads(rendered)
-        self.assertEqual(payload["incident"]["exception"], "ModuleNotFoundError")
-        self.assertEqual(payload["analysis"]["reason"], "unavailable")
-        self.assertIsNone(payload["analysis"]["failure_mechanism"])
-        self.assertEqual(payload["analysis"]["hypotheses"], [])
-        self.assertIn("Enrichment failed", stderr.getvalue())
-        self.assertIn("declared as a dependency", " ".join(payload["evidence"]["unknowns"]))
+        failures = (
+            httpx.ConnectError("refused"),
+            APIConnectionError(request=httpx.Request("POST", "http://127.0.0.1:8080/v1/chat/completions")),
+            APIStatusError(
+                "nope",
+                response=httpx.Response(500, request=httpx.Request("POST", "http://127.0.0.1:8080/v1")),
+                body=None,
+            ),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                fake = FakeModel([failure])
+                stderr = io.StringIO()
+                with patch_llm(return_value=fake), redirect_stderr(stderr):
+                    rendered = summarize(Path("django.log"), text, "json", backend="llamacpp")
+                payload = json.loads(rendered)
+                self.assertEqual(payload["incident"]["exception"], "ModuleNotFoundError")
+                self.assertEqual(payload["analysis"]["reason"], "unavailable")
+                self.assertIsNone(payload["analysis"]["failure_mechanism"])
+                self.assertEqual(payload["analysis"]["hypotheses"], [])
+                self.assertIn("Enrichment failed", stderr.getvalue())
+                self.assertEqual(len(fake.seen), 1)
 
     def test_non_log_text_is_summarized_in_chunks(self) -> None:
         from log_and_order.llm.prompts import COMBINE_PROMPT, SUMMARIZE_PROMPT

@@ -12,7 +12,7 @@ Order a noisy log into one incident report, or summarize another text file.
 
 A timestamped application log becomes a short incident report. The script extracts the events in code and decides which lines belong to the main failure, which lines are related, and which warnings stand alone. `LiquidAI/lfm2.5-2.6b` writes **Main failure** and **Related events** from that incident only. **Other warnings** is written in code from the remaining lines, so the same line is not listed twice. Line numbers in the report point back at the source file. The model does not suggest a fix. If a reply never leaves a thinking trace, it is retried once with a larger token budget. If that retry is still empty, the two narrative sections are filled from the extracted lines.
 
-`--format agent` and `--format json` use the same extracted incident. They ask the local model for hypotheses, investigation steps, and regression scenarios, then drop any claim that cites a log line or a source name the extraction did not supply. `--no-llm` skips that call and still writes the full factual report. If Ollama cannot be reached or the reply fails validation, the factual report is written anyway.
+`--format agent` and `--format json` use the same extracted incident. They ask the local model for hypotheses, investigation steps, and regression scenarios, then drop any claim that cites a log line or a source name the extraction did not supply. `--no-llm` skips that call and still writes the full factual report. If the model server cannot be reached or the reply fails validation, the factual report is written anyway.
 
 Extraction keeps errors and the warnings that describe a real problem. Health checks, skipped work, not-found responses, and warnings that later recover are left out. A stack trace keeps the exception and the application frame. Request and response lines that share the error's trace stay with it, as do the config change, missing value, and failed setup lines just before the crash when they share a component, job, key, or other id. The worker exit, service failure, connection refusals, restart, and recovery that follow an exception stay with that exception. The same exception a few seconds apart is one incident. The same text hours later, or after the service has started again, is another. Repeated lines are counted once, with the first and last time.
 
@@ -26,8 +26,8 @@ Any other file is summarized with `LiquidAI/lfm2.5-2.6b` through [LangChain](htt
 
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
-- [Ollama](https://ollama.com), running locally
-- The `LiquidAI/lfm2.5-2.6b` model
+- [Ollama](https://ollama.com), running locally, or a llama.cpp server that is already running
+- The `LiquidAI/lfm2.5-2.6b` model, or another model loaded by that server
 
 ## Setup
 
@@ -50,7 +50,7 @@ uv run main.py path/to/file --format json --model LiquidAI/lfm2.5-2.6b
 uv run main.py --dump-events path/to/file
 ```
 
-`--format human` is the default. It asks the model for **Main failure** and **Related events**. `--format agent` writes a Markdown incident brief, including a task for a coding agent. `--format json` writes that same incident as JSON, with an `analysis` object. Both call Ollama unless `--no-llm` is set. `--model` selects a different local model. When `--model` is omitted, `LOG_AND_ORDER_MODEL` is used if that variable is set. `--ollama-url` selects the Ollama server. When it is omitted, `OLLAMA_BASE_URL` is used if that variable is set, and otherwise the client keeps its local default. `--output` writes the report to a file instead of stdout.
+`--format human` is the default. It asks the model for **Main failure** and **Related events**. `--format agent` writes a Markdown incident brief, including a task for a coding agent. `--format json` writes that same incident as JSON, with an `analysis` object. Both call the selected model server unless `--no-llm` is set. `--backend` is `ollama` or `llamacpp`. When it is omitted, `LOG_AND_ORDER_BACKEND` is used if that variable is set, and otherwise the backend is Ollama. `--model` selects the model name. When it is omitted, `LOG_AND_ORDER_MODEL` is used if that variable is set. `--ollama-url` selects the Ollama server. When it is omitted, `OLLAMA_BASE_URL` is used if that variable is set, and otherwise the Ollama client keeps its local default. `--llama-url` is the llama.cpp origin, with no `/v1` path. When it is omitted, `LLAMA_BASE_URL` is used if that variable is set, and otherwise the client uses `http://127.0.0.1:8080`. `--output` writes the report to a file instead of stdout.
 
 `--format agent` and `--format json` need a timestamped application log or a Jenkins console log. Another text file exits 1. `--no-llm` on a non-log file also exits 1, because that summary is a model call. A Jenkins log is detected automatically. No extra flag is required.
 
@@ -77,11 +77,25 @@ These logs in `example-logs/` are noisy incidents the report is meant to digest:
 
 Jenkins consoles in `example-logs/` include a noisy TypeScript build failure, with and without Timestamper prefixes, plus smaller pipeline, freestyle, test, deploy, and infrastructure failures.
 
+## llama.cpp
+
+`--backend llamacpp` talks to a llama.cpp server you already started. PrismML's Bonsai launcher (`start_llama_server.sh`, usually `http://127.0.0.1:8080`) and mainstream `llama-server` speak the same OpenAI chat API. Newer `llama serve` uses port 9931. This program does not start the server and does not download GGUF weights. `Q2_0` Bonsai files run on mainstream builds from `b11555`. `PQ2_0` and the MTP drafter need the PrismML binary. That choice stays in the server command.
+
+```bash
+uv run main.py path/to/file --backend llamacpp --llama-url http://127.0.0.1:8080 --model bonsai
+```
+
+The client calls `{origin}/v1`. `--model` is a label. Both servers serve the one loaded model, so a label such as `bonsai` is accepted even when `GET /v1/models` reports a GGUF path. Set `LLAMA_API_KEY` when the server was started with `--api-key`. Bonsai's launcher does not check a key.
+
+The human report leaves thinking on and asks the server to keep the trace out of the answer. The token cap is 8192, then 16384 on the one retry, because a thinking model can spend a shorter cap inside the trace. Enrichment and ordinary summaries turn thinking off. Requests use temperature 0.1, which overrides a Bonsai sampling preset for that call only. Context size is the server's `-c` and is not sent on the request. The Bonsai launcher's 32768 is enough. Start a mainstream server with at least `-c 16384`.
+
+`llama-server` often listens on port 8080, which is also this program's HTTP API default. Move one of them when both run on the same machine.
+
 ## MCP server
 
 The same analysis is available to MCP clients such as Claude Code, Codex, and Cursor. The server is a read-only adapter. It does not parse logs itself, does not connect to a Jenkins server, and does not edit source files. A downloaded Jenkins console log is enough.
 
-Deterministic analysis is the default. `use_llm` is false unless the client sets it, so the report does not call Ollama. Set `use_llm` true to add the same local enrichment the CLI uses for `--format json`. If Ollama is down or the reply fails validation, the factual report is still returned.
+Deterministic analysis is the default. `use_llm` is false unless the client sets it, so the report does not call a model. Set `use_llm` true to add the same local enrichment the CLI uses for `--format json`. The backend, URL, and upstream API key come from `LOG_AND_ORDER_BACKEND`, `OLLAMA_BASE_URL` or `LLAMA_BASE_URL`, and `LLAMA_API_KEY`. A caller cannot point a tool at a different server. If the model server is down or the reply fails validation, the factual report is still returned.
 
 ### Install and launch
 
@@ -110,7 +124,7 @@ Inputs larger than 32 MiB are rejected. `read_log_lines` returns at most 200 lin
 
 - `path` (required): file inside `LOG_AND_ORDER_ROOT`
 - `use_llm`: default `false`
-- `model`: optional Ollama model name
+- `model`: optional model name. For llama.cpp this is a label, for example `bonsai`.
 - `detail`: `full` (default) or `compact`
 
 `detail=full` is that document unchanged: incident, locations, timeline, evidence, analysis, other warnings, and `jenkins` when the file is a console log. `source_line` is a line in application code. Evidence line numbers are lines in the log. `detail=compact` keeps the incident, locations, Jenkins facts, and those line numbers, and drops log excerpts.
@@ -235,7 +249,7 @@ LOG_AND_ORDER_ROOT=/absolute/path/to/logs \
 
 ## Running Log and Order as an HTTP Server
 
-The HTTP server is a third interface over the same analysis pipeline. The command line and the MCP server stay as they are. A Jenkins job, another CI system, or a monitoring tool can POST a log and receive the JSON incident document that `--format json` already writes. The server does not contain Ollama and does not download model weights. It calls an Ollama server you already run.
+The HTTP server is a third interface over the same analysis pipeline. The command line and the MCP server stay as they are. A Jenkins job, another CI system, or a monitoring tool can POST a log and receive the JSON incident document that `--format json` already writes. The server does not contain Ollama or llama.cpp and does not download model weights. It calls the model server you already run.
 
 FastAPI is an optional extra, in the same way the MCP server is.
 
@@ -246,7 +260,17 @@ LOG_AND_ORDER_MODEL=LiquidAI/lfm2.5-2.6b \
 uv run --extra api python -m log_and_order.api
 ```
 
-The process listens on `127.0.0.1:8080` unless `LOG_AND_ORDER_HOST` and `LOG_AND_ORDER_PORT` say otherwise. It checks Ollama at startup and prints a warning if the server or the model is missing. That warning does not stop the process. `GET /api/v1/health` answers while Ollama is down. `GET /api/v1/ready` returns 503 until the configured server lists the configured model.
+The process listens on `127.0.0.1:8080` unless `LOG_AND_ORDER_HOST` and `LOG_AND_ORDER_PORT` say otherwise. It checks the selected model server at startup and prints a warning if that server is missing or, for Ollama, if the model is not installed. That warning does not stop the process. `GET /api/v1/health` does not call the model server. `GET /api/v1/ready` returns 503 until Ollama lists the configured model, or until llama.cpp's `/health` returns 200. A llama.cpp label that differs from the served GGUF id is still ready. `reason` `loading` means llama.cpp has not finished loading the model.
+
+For llama.cpp, set `LOG_AND_ORDER_BACKEND=llamacpp` and `LLAMA_BASE_URL` to the origin. This API's default port is 8080, the same port Bonsai's launcher uses, so publish the API on another port when both run on one machine.
+
+```bash
+LOG_AND_ORDER_BACKEND=llamacpp \
+LLAMA_BASE_URL=http://127.0.0.1:8080 \
+LOG_AND_ORDER_MODEL=bonsai \
+LOG_AND_ORDER_PORT=8090 \
+uv run --extra api python -m log_and_order.api
+```
 
 ### Docker
 
@@ -256,14 +280,17 @@ export LOG_AND_ORDER_MODEL=LiquidAI/lfm2.5-2.6b
 docker compose up -d --build
 ```
 
-Compose refuses to start when either variable is missing. The image runs Uvicorn as a non-root user, publishes `127.0.0.1:8080` on the host, and restarts after an unexpected exit. The container has no GPU and no Ollama installation. Set `LOG_AND_ORDER_API_KEY` before you publish the port on any interface other than localhost.
+Compose refuses to start when `LOG_AND_ORDER_MODEL` is missing. The process exits when the selected backend's URL is missing. The image runs Uvicorn as a non-root user, publishes `127.0.0.1:8080` on the host, and restarts after an unexpected exit. The container has no GPU and no model server. Set `LOG_AND_ORDER_API_KEY` before you publish the port on any interface other than localhost.
 
 Copy [`.env.example`](.env.example) to `.env` if you want Compose to read the variables from a file. Do not commit a real API key.
 
 | Variable | Role |
 | --- | --- |
-| `OLLAMA_BASE_URL` | Required. Full Ollama URL, including the port. Used as given. |
-| `LOG_AND_ORDER_MODEL` | Required. Model name that is already installed on that server. |
+| `LOG_AND_ORDER_BACKEND` | `ollama` or `llamacpp`. Default `ollama`. |
+| `OLLAMA_BASE_URL` | Required when the backend is Ollama. Full Ollama URL, including the port. Used as given. |
+| `LLAMA_BASE_URL` | Required when the backend is llama.cpp. Origin only, for example `http://127.0.0.1:8080`. The client adds `/v1`. |
+| `LLAMA_API_KEY` | Optional Bearer token for a llama.cpp server started with `--api-key`. This is not `LOG_AND_ORDER_API_KEY`. |
+| `LOG_AND_ORDER_MODEL` | Required. Ollama model name, or a llama.cpp label such as `bonsai`. |
 | `LOG_AND_ORDER_API_KEY` | Optional Bearer token. Empty means open access, which is only suitable on localhost. |
 | `LOG_AND_ORDER_MAX_UPLOAD_MB` | Largest accepted upload. Default 32. |
 | `LOG_AND_ORDER_OLLAMA_TIMEOUT` | Inference timeout in seconds. Default 120. |
@@ -271,7 +298,7 @@ Copy [`.env.example`](.env.example) to `.env` if you want Compose to read the va
 | `LOG_AND_ORDER_PORT` | Port inside the container. Default 8080. |
 | `LOG_AND_ORDER_PUBLISH_PORT` | Localhost port on the host. Default 8080. |
 
-The HTTP port and Ollama's port 11434 are independent. The container does not rewrite the Ollama URL and does not search the network for a server.
+The HTTP port and the model server's port are independent. The container does not rewrite the URL and does not search the network for a server. A llama.cpp server on port 8080 collides with this API's published port. Set `LOG_AND_ORDER_PUBLISH_PORT` or start llama.cpp on another port.
 
 ### Where Ollama runs
 
@@ -293,7 +320,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/analyze \
 
 Omit the Authorization header when no API key is configured. The response is the existing JSON incident document. `analysis.enriched` is true when the model analysis was accepted. `analysis.fallback` is true, and `analysis.reason` explains why, when the report is the deterministic one. A fallback is still HTTP 200: the facts were extracted, and the model did not diagnose the incident. `analysis.failure_mechanism` is null in that case.
 
-`GET /api/v1/models` lists the names Ollama already has. It cannot pull, delete, or switch models. With an API key set, this route and `POST /api/v1/analyze` require the Bearer token. Health and ready stay open and do not reveal the key or the Ollama URL.
+`GET /api/v1/models` lists the names the configured server reports. For Ollama that is `/api/tags`. For llama.cpp it is the one id from `/v1/models`, which is the GGUF path unless the server was started with `--alias`. The route cannot pull, delete, or switch models. With an API key set, this route and `POST /api/v1/analyze` require the Bearer token. Health and ready stay open and do not reveal the key or the model server URL.
 
 A file that is empty, binary, or not UTF-8 is rejected. A file that is neither a Jenkins console nor a timestamped log returns 422. An upload past the size limit returns 413. The server reads the upload in memory, up to that limit, and does not keep a copy.
 
@@ -370,14 +397,15 @@ Keep that block in the same `try` so a refused console download or a refused dia
 
 Leave the Compose port binding at `127.0.0.1` when the only client is on the same machine. A Jenkins controller on another machine needs a published port or a private network path. Set `LOG_AND_ORDER_API_KEY` first, store that value in Jenkins as a secret text credential, and terminate HTTPS at a reverse proxy. The application speaks HTTP and does not terminate TLS itself. Do not put the key in the Jenkinsfile, the image, or the log.
 
-The Ollama URL and the model name come from the server environment. A request cannot point the analysis at a different HTTP service. Uploaded logs are untrusted, including text that tries to instruct the model. The existing redaction and evidence checks still apply.
+The model server URL and the model name come from the server environment. A request cannot point the analysis at a different HTTP service. Uploaded logs are untrusted, including text that tries to instruct the model. The existing redaction and evidence checks still apply.
 
 ### Troubleshooting
 
 `GET /api/v1/health` returns 200 when the process is up, even if `/api/v1/ready` returns 503.
 
-- `reason` is `unreachable`: the process cannot open `OLLAMA_BASE_URL`. From the host, `curl -sS "$OLLAMA_BASE_URL/api/tags"` should return JSON. From a bridge container, `127.0.0.1` is the wrong address for a host-local Ollama. See the networking cases above.
-- `reason` is `model_missing`: Ollama answered, and the configured name is not in `/api/tags`. Names often look like `LiquidAI/lfm2.5-2.6b:latest`. The server accepts that tag for the name `LiquidAI/lfm2.5-2.6b`. It will not pull a model and it will not substitute another one.
+- `reason` is `unreachable`: the process cannot open the selected server. For Ollama, `curl -sS "$OLLAMA_BASE_URL/api/tags"` should return JSON. For llama.cpp, `curl -sS "$LLAMA_BASE_URL/health"` should return 200. From a bridge container, `127.0.0.1` is the wrong address for a host-local server. See the networking cases above.
+- `reason` is `loading`: llama.cpp answered 503 because the model is still loading. Ready stays 503, and `/api/v1/models` returns `llama_unavailable`, until `/health` is 200.
+- `reason` is `model_missing`: Ollama answered, and the configured name is not in `/api/tags`. Names often look like `LiquidAI/lfm2.5-2.6b:latest`. The server accepts that tag for the name `LiquidAI/lfm2.5-2.6b`. It will not pull a model and it will not substitute another one. llama.cpp does not use this reason. A label that differs from the served id is still ready.
 - The analysis returns 200 with `analysis.fallback` true and `analysis.reason` `unavailable`: extraction finished, and the model call did not. The failure mechanism and hypotheses are empty on purpose. A timeout uses `LOG_AND_ORDER_OLLAMA_TIMEOUT`.
 - `analysis.enriched` true means the model reply passed the evidence checks. That is model analysis, not a confirmed cause.
 

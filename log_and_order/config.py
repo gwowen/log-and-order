@@ -4,6 +4,9 @@ import os
 from datetime import timedelta
 
 MODEL_NAME = "LiquidAI/lfm2.5-2.6b"
+# llama-server's usual port. `llama serve` uses 9931 instead.
+DEFAULT_LLAMA_URL = "http://127.0.0.1:8080"
+BACKENDS = ("ollama", "llamacpp")
 # Leave room in the context window for the prompt and the summary itself.
 CHUNK_SIZE = 12_000
 CHUNK_OVERLAP = 400
@@ -62,3 +65,47 @@ def configured_base_url(explicit: str | None = None) -> str | None:
         return explicit.strip()
     env = os.environ.get("OLLAMA_BASE_URL", "").strip()
     return env or None
+
+
+def configured_backend(explicit: str | None = None) -> str:
+    """ollama or llamacpp. An explicit value wins, then LOG_AND_ORDER_BACKEND.
+
+    An empty value is ollama. Any other name is an error.
+    """
+    if explicit is not None and explicit.strip():
+        raw = explicit.strip()
+    else:
+        raw = os.environ.get("LOG_AND_ORDER_BACKEND", "").strip()
+    if not raw:
+        return "ollama"
+    if raw not in BACKENDS:
+        raise ValueError("LOG_AND_ORDER_BACKEND must be ollama or llamacpp.")
+    return raw
+
+
+def configured_llama_url(explicit: str | None = None) -> str | None:
+    """An explicit llama.cpp origin, otherwise LLAMA_BASE_URL.
+
+    None leaves the local llama-server default. The value is an origin: the
+    client adds /v1. The HTTP server requires a URL when that backend is selected.
+    """
+    if explicit is not None and explicit.strip():
+        return explicit.strip()
+    env = os.environ.get("LLAMA_BASE_URL", "").strip()
+    return env or None
+
+
+def configured_llama_api_key() -> str | None:
+    """Bearer token for a llama.cpp server started with --api-key.
+
+    Bonsai's launcher does not check this. It is not the HTTP API's own key.
+    """
+    env = os.environ.get("LLAMA_API_KEY", "").strip()
+    return env or None
+
+
+def server_label(backend: str) -> str:
+    """Name used in connection errors. The default backend is Ollama."""
+    if backend == "llamacpp":
+        return "llama.cpp"
+    return "Ollama"

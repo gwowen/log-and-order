@@ -16,7 +16,10 @@ from .config import (
     MCP_MAX_INPUT_BYTES,
     MCP_MAX_LINE_CHARS,
     MCP_MAX_LINE_COUNT,
+    configured_backend,
     configured_base_url,
+    configured_llama_api_key,
+    configured_llama_url,
     configured_model,
 )
 from .files import read_text_file
@@ -194,6 +197,21 @@ def _present(document: dict[str, Any], detail: str) -> dict[str, Any]:
     return document
 
 
+def _model_target() -> dict[str, object]:
+    """Backend and origin from the environment. A caller cannot supply a URL."""
+    try:
+        backend = configured_backend()
+    except ValueError as exc:
+        raise _tool_error(str(exc)) from exc
+    if backend == "llamacpp":
+        return {
+            "backend": backend,
+            "base_url": configured_llama_url(),
+            "api_key": configured_llama_api_key(),
+        }
+    return {"backend": backend, "base_url": configured_base_url(), "api_key": None}
+
+
 def analyse_content(
     path: Path,
     text: str,
@@ -212,13 +230,15 @@ def analyse_content(
     redacted = redact_lines(text)
     if not redacted.strip():
         raise _tool_error(empty_message)
+    target = _model_target() if use_llm else {"backend": "ollama", "base_url": None, "api_key": None}
     try:
         document = incident_payload(
             path,
             redacted,
             use_llm=use_llm,
             model=configured_model(_model_name(model)),
-            base_url=configured_base_url(),
+            timeout=None,
+            **target,
         )
     except FormatError as exc:
         raise _tool_error(str(exc)) from exc

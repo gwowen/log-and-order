@@ -6,8 +6,17 @@ from pathlib import Path
 
 import httpx
 from ollama import ResponseError
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-from .config import MODEL_NAME, configured_base_url, configured_model
+from .config import (
+    MODEL_NAME,
+    configured_backend,
+    configured_base_url,
+    configured_llama_api_key,
+    configured_llama_url,
+    configured_model,
+    server_label,
+)
 from .files import read_text_file as read_file
 from .llm.client import GenerationError
 from .logs.extraction import extract_events
@@ -47,11 +56,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        help=f"Ollama model name. Defaults to LOG_AND_ORDER_MODEL when set, otherwise {MODEL_NAME}.",
+        help=(
+            "Model name. Defaults to LOG_AND_ORDER_MODEL when set, "
+            f"otherwise {MODEL_NAME}. llama.cpp accepts any label, for example bonsai."
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("ollama", "llamacpp"),
+        help="Model server. Defaults to LOG_AND_ORDER_BACKEND when set, otherwise ollama.",
     )
     parser.add_argument(
         "--ollama-url",
         help="Ollama server URL. Defaults to OLLAMA_BASE_URL when set, otherwise the local Ollama client.",
+    )
+    parser.add_argument(
+        "--llama-url",
+        help=(
+            "llama.cpp origin, without a path. Defaults to LLAMA_BASE_URL when set, "
+            "otherwise http://127.0.0.1:8080. Used when the backend is llamacpp."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -111,25 +135,43 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
+        backend = configured_backend(args.backend)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if backend == "llamacpp":
+        base_url = configured_llama_url(args.llama_url)
+        api_key = configured_llama_api_key()
+    else:
+        base_url = configured_base_url(args.ollama_url)
+        api_key = None
+    server = server_label(backend)
+
+    try:
         summary = summarize(
             path,
             text,
             args.report_format,
             use_llm=not args.no_llm,
             model=configured_model(args.model),
-            base_url=configured_base_url(args.ollama_url),
+            base_url=base_url,
+            backend=backend,
+            api_key=api_key,
         )
     except FormatError as exc:
         print(exc, file=sys.stderr)
         return 1
-    except (httpx.ConnectError, ConnectionError):
+    except APITimeoutError as exc:
+        print(f"{server} request failed: {exc}", file=sys.stderr)
+        return 1
+    except (httpx.ConnectError, ConnectionError, APIConnectionError):
         print(
-            "Could not connect to Ollama. Start it and try again.",
+            f"Could not connect to {server}. Start it and try again.",
             file=sys.stderr,
         )
         return 1
-    except ResponseError as exc:
-        print(f"Ollama request failed: {exc}", file=sys.stderr)
+    except (ResponseError, APIStatusError) as exc:
+        print(f"{server} request failed: {exc}", file=sys.stderr)
         return 1
     except GenerationError as exc:
         print(exc, file=sys.stderr)

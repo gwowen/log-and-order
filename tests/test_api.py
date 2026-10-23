@@ -27,6 +27,7 @@ NOISY = LOGS / "jenkins_noisy_build_failure.log"
 SHELL = LOGS / "jenkins_shell_failure.log"
 MODEL = "LiquidAI/lfm2.5-2.6b"
 OLLAMA = "http://ollama.internal:11434"
+LLAMA = "http://llama.internal:8080"
 
 
 def api_settings(**overrides: object) -> ApiSettings:
@@ -54,6 +55,38 @@ def tags_factory(names: list[str] | None = None, error: Exception | None = None)
             raise error
         listed = names if names is not None else [f"{MODEL}:latest"]
         return httpx.Response(200, json={"models": [{"name": name} for name in listed]})
+
+    def factory() -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+    return factory
+
+
+def llama_factory(
+    model_id: str = "models/bonsai.gguf",
+    *,
+    health: int = 200,
+    models_status: int = 200,
+    error: Exception | None = None,
+    seen: list | None = None,
+):
+    """A client factory for /health and /v1/models."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append((request.url.path, request.headers.get("authorization")))
+        if error is not None:
+            raise error
+        if request.url.path == "/health":
+            if health == 503:
+                return httpx.Response(503, json={"error": {"message": "Loading model"}})
+            return httpx.Response(health, json={"status": "ok"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                models_status,
+                json={"object": "list", "data": [{"id": model_id, "object": "model"}]},
+            )
+        return httpx.Response(404, json={"error": "not found"})
 
     def factory() -> httpx.Client:
         return httpx.Client(transport=httpx.MockTransport(handler))
@@ -97,6 +130,37 @@ class ApiSettingsTest(unittest.TestCase):
         self.assertEqual(settings.max_concurrent, 1)
         self.assertEqual(settings.host, "127.0.0.1")
         self.assertEqual(settings.port, 8080)
+        self.assertEqual(settings.backend, "ollama")
+        self.assertEqual(settings.llama_base_url, "")
+        self.assertIsNone(settings.llama_api_key)
+
+    def test_llama_cpp_settings_require_an_origin(self) -> None:
+        with self.assertRaises(SettingsError) as caught:
+            load_settings({"LOG_AND_ORDER_BACKEND": "llamacpp", "LOG_AND_ORDER_MODEL": "bonsai"})
+        self.assertIn("LLAMA_BASE_URL", str(caught.exception))
+        self.assertNotIn("OLLAMA_BASE_URL", str(caught.exception))
+        for url in ("ftp://llama.internal", "http://llama.internal/v1", "http://llama.internal/health"):
+            with self.assertRaises(SettingsError):
+                load_settings(
+                    {
+                        "LOG_AND_ORDER_BACKEND": "llamacpp",
+                        "LLAMA_BASE_URL": url,
+                        "LOG_AND_ORDER_MODEL": "bonsai",
+                    }
+                )
+        settings = load_settings(
+            {
+                "LOG_AND_ORDER_BACKEND": "llamacpp",
+                "LLAMA_BASE_URL": "http://127.0.0.1:8080/",
+                "LLAMA_API_KEY": "upstream-key",
+                "LOG_AND_ORDER_MODEL": "bonsai",
+            }
+        )
+        self.assertEqual(settings.backend, "llamacpp")
+        self.assertEqual(settings.llama_base_url, "http://127.0.0.1:8080")
+        self.assertEqual(settings.llama_api_key, "upstream-key")
+        self.assertEqual(settings.ollama_base_url, "")
+        self.assertEqual(settings.model, "bonsai")
 
     def test_main_exits_when_configuration_is_missing(self) -> None:
         from log_and_order.api.__main__ import main as serve
@@ -169,6 +233,82 @@ class HttpApiTest(unittest.TestCase):
             response = client.get("/api/v1/models")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"], "ollama_unavailable")
+
+    def test_llama_ready_ignores_a_different_served_id(self) -> None:
+        seen: list = []
+        settings = api_settings(
+            backend="llamacpp",
+            ollama_base_url="",
+            llama_base_url=LLAMA,
+            model="bonsai",
+        )
+        with TestClient(create_app(settings, llama_factory(seen=seen))) as client:
+            response = client.get("/api/v1/ready")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ready", "model": "bonsai", "reason": "ok"})
+        self.assertEqual([path for path, _auth in seen], ["/health"])
+
+    def test_llama_models_lists_the_served_id(self) -> None:
+        seen: list = []
+        settings = api_settings(
+            backend="llamacpp",
+            ollama_base_url="",
+            llama_base_url=LLAMA,
+            llama_api_key="upstream-key",
+            model="bonsai",
+            api_key="example-secret",
+        )
+        with TestClient(create_app(settings, llama_factory("models/bonsai.gguf", seen=seen))) as client:
+            response = client.get(
+                "/api/v1/models",
+                headers={"Authorization": "Bearer example-secret"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["models"], ["models/bonsai.gguf"])
+        self.assertIn(("/v1/models", "Bearer upstream-key"), seen)
+
+    def test_llama_loading_and_unreachable_are_not_a_model_list(self) -> None:
+        settings = api_settings(backend="llamacpp", ollama_base_url="", llama_base_url=LLAMA, model="bonsai")
+        with TestClient(create_app(settings, llama_factory(health=503))) as client:
+            ready = client.get("/api/v1/ready")
+            models = client.get("/api/v1/models")
+        self.assertEqual(ready.status_code, 503)
+        self.assertEqual(ready.json()["reason"], "loading")
+        self.assertEqual(models.status_code, 503)
+        self.assertEqual(models.json()["error"], "llama_unavailable")
+        self.assertIn("loading", models.json()["detail"])
+
+        with TestClient(create_app(settings, llama_factory(error=httpx.ConnectError("refused")))) as client:
+            ready = client.get("/api/v1/ready")
+            models = client.get("/api/v1/models")
+        self.assertEqual(ready.json()["reason"], "unreachable")
+        self.assertEqual(models.status_code, 503)
+        self.assertEqual(models.json()["error"], "llama_unavailable")
+
+    def test_llama_upload_uses_the_configured_origin(self) -> None:
+        settings = api_settings(
+            backend="llamacpp",
+            ollama_base_url="",
+            llama_base_url=LLAMA,
+            llama_api_key="upstream-key",
+            model="bonsai",
+            ollama_timeout=15,
+        )
+        with (
+            patch_llm(return_value=FakeModel(["{}"])) as built,
+            redirect_stderr(io.StringIO()),
+            TestClient(create_app(settings, llama_factory())) as client,
+        ):
+            response = client.post(
+                "/api/v1/analyze",
+                files={"file": ("jenkins_shell_failure.log", SHELL.read_bytes(), "text/plain")},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(built.call_args.kwargs["backend"], "llamacpp")
+        self.assertEqual(built.call_args.kwargs["base_url"], LLAMA)
+        self.assertEqual(built.call_args.kwargs["api_key"], "upstream-key")
+        self.assertEqual(built.call_args.kwargs["model"], "bonsai")
+        self.assertEqual(built.call_args.kwargs["timeout"], 15)
 
     def test_rejects_empty_binary_encoding_and_oversize_uploads(self) -> None:
         settings = api_settings(max_upload_bytes=64)
@@ -303,7 +443,11 @@ class OllamaConfigForwardingTest(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"OLLAMA_BASE_URL": "http://env.example:11434", "LOG_AND_ORDER_MODEL": "env-model"},
+                {
+                    "LOG_AND_ORDER_BACKEND": "ollama",
+                    "OLLAMA_BASE_URL": "http://env.example:11434",
+                    "LOG_AND_ORDER_MODEL": "env-model",
+                },
             ),
             patch_llm(return_value=FakeModel(["{}"])) as patched,
             redirect_stdout(io.StringIO()),
@@ -327,7 +471,11 @@ class OllamaConfigForwardingTest(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"OLLAMA_BASE_URL": "http://env.example:11434", "LOG_AND_ORDER_MODEL": "env-model"},
+                {
+                    "LOG_AND_ORDER_BACKEND": "ollama",
+                    "OLLAMA_BASE_URL": "http://env.example:11434",
+                    "LOG_AND_ORDER_MODEL": "env-model",
+                },
             ),
             patch_llm(return_value=FakeModel(["{}"])) as patched,
             redirect_stdout(io.StringIO()),
@@ -340,7 +488,10 @@ class OllamaConfigForwardingTest(unittest.TestCase):
 
     def test_cli_without_configuration_keeps_the_local_default(self) -> None:
         with (
-            patch.dict(os.environ, {"OLLAMA_BASE_URL": "", "LOG_AND_ORDER_MODEL": ""}),
+            patch.dict(
+                os.environ,
+                {"OLLAMA_BASE_URL": "", "LOG_AND_ORDER_MODEL": "", "LOG_AND_ORDER_BACKEND": ""},
+            ),
             patch_llm(return_value=FakeModel(["{}"])) as patched,
             redirect_stdout(io.StringIO()),
             redirect_stderr(io.StringIO()),
@@ -356,7 +507,11 @@ class OllamaConfigForwardingTest(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"OLLAMA_BASE_URL": "http://mcp.example:11434", "LOG_AND_ORDER_MODEL": "mcp-model"},
+                {
+                    "LOG_AND_ORDER_BACKEND": "ollama",
+                    "OLLAMA_BASE_URL": "http://mcp.example:11434",
+                    "LOG_AND_ORDER_MODEL": "mcp-model",
+                },
             ),
             patch_llm(return_value=FakeModel(["{}"])) as patched,
             redirect_stderr(io.StringIO()),
@@ -371,4 +526,77 @@ class OllamaConfigForwardingTest(unittest.TestCase):
             )
         self.assertEqual(patched.call_args.kwargs["model"], "tool-model")
         self.assertEqual(patched.call_args.kwargs["base_url"], "http://mcp.example:11434")
+        self.assertEqual(patched.call_args.kwargs["backend"], "ollama")
+        self.assertIsNone(patched.call_args.kwargs["api_key"])
         self.assertEqual(MODEL_NAME, "LiquidAI/lfm2.5-2.6b")
+
+    def test_cli_and_mcp_forward_llama_cpp(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LOG_AND_ORDER_BACKEND": "llamacpp",
+                    "LLAMA_BASE_URL": "http://env.example:8080",
+                    "LLAMA_API_KEY": "env-key",
+                    "OLLAMA_BASE_URL": "http://ollama.example:11434",
+                    "LOG_AND_ORDER_MODEL": "bonsai",
+                },
+            ),
+            patch_llm(return_value=FakeModel(["{}"])) as patched,
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            status = main(
+                [
+                    "--format",
+                    "json",
+                    "--backend",
+                    "llamacpp",
+                    "--llama-url",
+                    "http://flag.example:9931",
+                    "--model",
+                    "bonsai",
+                    str(SHELL),
+                ]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(patched.call_args.kwargs["backend"], "llamacpp")
+        self.assertEqual(patched.call_args.kwargs["base_url"], "http://flag.example:9931")
+        self.assertEqual(patched.call_args.kwargs["api_key"], "env-key")
+        self.assertEqual(patched.call_args.kwargs["model"], "bonsai")
+
+        text = SHELL.read_text()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "LOG_AND_ORDER_BACKEND": "llamacpp",
+                    "LLAMA_BASE_URL": "http://mcp.example:8080",
+                    "LLAMA_API_KEY": "mcp-key",
+                    "OLLAMA_BASE_URL": "http://ollama.example:11434",
+                },
+            ),
+            patch_llm(return_value=FakeModel(["{}"])) as patched,
+            redirect_stderr(io.StringIO()),
+        ):
+            analyse_content(
+                Path("jenkins_shell_failure.log"),
+                text,
+                use_llm=True,
+                model=None,
+                detail="full",
+                empty_message="The file is empty.",
+            )
+        self.assertEqual(patched.call_args.kwargs["backend"], "llamacpp")
+        self.assertEqual(patched.call_args.kwargs["base_url"], "http://mcp.example:8080")
+        self.assertEqual(patched.call_args.kwargs["api_key"], "mcp-key")
+
+    def test_no_llm_does_not_call_llama_cpp(self) -> None:
+        with (
+            patch.dict(os.environ, {"LOG_AND_ORDER_BACKEND": "llamacpp"}),
+            patch_llm(side_effect=AssertionError("model called")),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            status = main(["--format", "json", "--no-llm", "--backend", "llamacpp", str(SHELL)])
+        self.assertEqual(status, 0)

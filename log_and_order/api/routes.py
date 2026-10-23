@@ -10,11 +10,12 @@ import httpx
 from fastapi import APIRouter, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+from ..config import server_label
 from ..logs.jenkins.text import redact
 from ..pipeline import FormatError, incident_payload
-from .ollama import OllamaStatus, check_ollama, describe_target
+from .ollama import OllamaStatus, check_llama, check_ollama, describe_target
 from .schemas import ErrorBody, HealthBody, ModelsBody, ReadyBody
-from .settings import ApiSettings
+from .settings import ApiSettings, model_origin
 
 logger = logging.getLogger("log_and_order.api")
 router = APIRouter()
@@ -97,15 +98,40 @@ def analyse_upload(name: str, text: str, settings: ApiSettings) -> dict:
         text,
         use_llm=True,
         model=settings.model,
-        base_url=settings.ollama_base_url,
+        base_url=model_origin(settings),
         timeout=settings.ollama_timeout,
+        backend=settings.backend,
+        api_key=settings.llama_api_key if settings.backend == "llamacpp" else None,
     )
 
 
-def probe(settings: ApiSettings, factory: Callable[[], httpx.Client]) -> OllamaStatus:
-    """One tags check. The client comes from the app so tests can replace it."""
+def probe(
+    settings: ApiSettings,
+    factory: Callable[[], httpx.Client],
+    *,
+    list_models: bool = False,
+) -> OllamaStatus:
+    """One readiness check. The client comes from the app so tests can replace it."""
     with factory() as client:
+        if settings.backend == "llamacpp":
+            return check_llama(
+                settings.llama_base_url,
+                client=client,
+                api_key=settings.llama_api_key,
+                list_models=list_models,
+            )
         return check_ollama(settings.ollama_base_url, settings.model, client=client)
+
+
+def model_unavailable(settings: ApiSettings, status: OllamaStatus) -> ApiError | None:
+    """503 when the model list cannot be read. A missing Ollama tag still returns names."""
+    if settings.backend == "llamacpp" and status.reason == "loading":
+        return ApiError(503, "llama_unavailable", "The llama.cpp server is still loading its model.")
+    if status.reason == "unreachable":
+        if settings.backend == "llamacpp":
+            return ApiError(503, "llama_unavailable", "The configured llama.cpp server is not reachable.")
+        return ApiError(503, "ollama_unavailable", "The configured Ollama server is not reachable.")
+    return None
 
 
 @router.get("/health", response_model=HealthBody)
@@ -116,15 +142,16 @@ async def health() -> dict[str, str]:
 
 @router.get("/ready", response_model=ReadyBody, responses={503: {"model": ReadyBody}})
 async def ready(request: Request) -> JSONResponse:
-    """Whether the configured Ollama server has the configured model."""
+    """Whether the configured model server can answer. This does not run a completion."""
     settings: ApiSettings = request.app.state.settings
     status = await asyncio.to_thread(probe, settings, request.app.state.client_factory)
     body = {"status": "ready" if status.ok else "not_ready", "model": settings.model, "reason": status.reason}
     if not status.ok:
         logger.warning(
-            "ollama not ready reason=%s target=%s model=%s",
+            "%s not ready reason=%s target=%s model=%s",
+            server_label(settings.backend),
             status.reason,
-            describe_target(settings.ollama_base_url),
+            describe_target(model_origin(settings)),
             settings.model,
         )
     code = 200 if status.ok else 503
@@ -137,12 +164,18 @@ async def ready(request: Request) -> JSONResponse:
     responses={401: {"model": ErrorBody}, 503: {"model": ErrorBody}},
 )
 async def models(request: Request) -> dict[str, list[str]]:
-    """Model names reported by the configured Ollama server."""
+    """Model names reported by the configured model server."""
     require_auth(request)
     settings: ApiSettings = request.app.state.settings
-    status = await asyncio.to_thread(probe, settings, request.app.state.client_factory)
-    if status.reason == "unreachable":
-        raise ApiError(503, "ollama_unavailable", "The configured Ollama server is not reachable.")
+    status = await asyncio.to_thread(
+        probe,
+        settings,
+        request.app.state.client_factory,
+        list_models=True,
+    )
+    unavailable = model_unavailable(settings, status)
+    if unavailable is not None:
+        raise unavailable
     return {"models": status.models}
 
 
